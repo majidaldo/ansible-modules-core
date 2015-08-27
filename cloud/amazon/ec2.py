@@ -1182,6 +1182,8 @@ def startstop_instances(module, ec2, instance_ids, state, instance_tags):
 
     wait = module.params.get('wait')
     wait_timeout = int(module.params.get('wait_timeout'))
+    state = module.params.get('state')
+
     changed = False
     instance_dict_array = []
 
@@ -1198,22 +1200,36 @@ def startstop_instances(module, ec2, instance_ids, state, instance_tags):
         for key, value in instance_tags.items():
             filters["tag:" + key] = value
 
-     # Check that our instances are not in the state we want to take
+    if not isinstance(instance_ids, list):
+        reses=ec2.get_all_instances(filters=filters)
+        instance_ids=[]
+        for ares in reses:
+            for ainst in ares.instances:
+                instance_ids.append(ainst.id)
 
+     # Check that our instances are not in the state we want to take
+    def transition_handler( id=None, state=None ):
+        #instance_ids.pop(id)
+        em='ambiguous intention. wait until instance states are not changing'
+        raise Exception(em)
+    th = transition_handler
     # Check (and eventually change) instances attributes and instances state
-    running_instances_array = []
     for res in ec2.get_all_instances(instance_ids, filters=filters):
         for inst in res.instances:
 
-            # Check "source_dest_check" attribute
-            if inst.get_attribute('sourceDestCheck')['sourceDestCheck'] != source_dest_check:
-                inst.modify_attribute('sourceDestCheck', source_dest_check)
-                changed = True
-
-            # Check "termination_protection" attribute
-            if inst.get_attribute('disableApiTermination')['disableApiTermination'] != termination_protection:
-                inst.modify_attribute('disableApiTermination', termination_protection)
-                changed = True
+            # only want to deal with running or stopped instances
+            # ideally we should wait until instances are not in transition
+            # excuse the noncompliance to PEP but it's more readable
+            if   inst.state == 'pending':       th(inst.id)  #transition
+            elif inst.state == 'running':       pass
+            elif inst.state == 'shutting-down': th(inst.id)  #transition
+            elif inst.state == 'stopping':      th(inst.id)  #transition
+            elif inst.state == 'stopped':       pass
+            elif inst.state == 'terminated':
+                instance_ids.remove(inst.id)
+                continue # don't deal with it
+            else: #should never come here
+                raise ValueError('unrecognized state')
 
             # Check instance state
             if inst.state != state:
@@ -1237,6 +1253,7 @@ def startstop_instances(module, ec2, instance_ids, state, instance_tags):
                 if i.state == state:
                     instance_dict_array.append(get_instance_info(i))
                     matched_instances.append(i)
+
         if len(matched_instances) < len(instance_ids):
             time.sleep(5)
         else:
